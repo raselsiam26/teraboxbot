@@ -3,7 +3,7 @@ import re
 import json
 import logging
 import requests
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, quote
 from http.server import BaseHTTPRequestHandler
 
 logging.basicConfig(level=logging.INFO)
@@ -20,16 +20,13 @@ TERABOX_DOMAINS = [
 ]
 
 HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Referer": "https://www.terabox.com/",
+    "User-Agent": "Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Origin": "https://terabox.com",
+    "Referer": "https://terabox.com/",
 }
 
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def is_terabox_link(url: str) -> bool:
     try:
@@ -53,83 +50,122 @@ def _human_size(size: int) -> str:
 
 
 def fetch_terabox_direct(share_url: str) -> dict:
-    # Resolver 1
+    encoded = quote(share_url, safe="")
+
+    # ── Resolver 1: starlly API (most reliable) ───────────────────────────────
     try:
-        proxy = f"https://terabox.udayscriptsx.workers.dev/?url={share_url}"
-        resp = requests.get(proxy, headers=HEADERS, timeout=20)
-        resp.raise_for_status()
-        data = resp.json()
-        if data.get("status") == "success":
-            direct_url = data.get("direct_url") or data.get("download_url") or ""
-            if direct_url:
+        api = f"https://starlly.in/terabox.php?url={encoded}"
+        r = requests.get(api, headers=HEADERS, timeout=25)
+        r.raise_for_status()
+        data = r.json()
+        logger.info("Resolver 1 response: %s", data)
+        # returns: {status, download_url, title, thumbnail, size}
+        if data.get("status") in ("success", "ok", True, "true") or data.get("download_url"):
+            direct = data.get("download_url") or data.get("url") or ""
+            if direct:
                 return {
-                    "title":      data.get("title") or "Video",
-                    "thumbnail":  data.get("thumbnail"),
-                    "direct_url": direct_url,
-                    "size":       data.get("size") or "অজানা",
+                    "title":      data.get("title") or data.get("file_name") or "Video",
+                    "thumbnail":  data.get("thumbnail") or data.get("thumb"),
+                    "direct_url": direct,
+                    "size":       str(data.get("size") or "অজানা"),
                     "is_video":   _is_video_file(data.get("title") or ""),
                 }
     except Exception as e:
         logger.warning("Resolver 1 failed: %s", e)
 
-    # Resolver 2
+    # ── Resolver 2: terabox-dl worker ────────────────────────────────────────
     try:
-        api_url = f"https://teraboxapp.com/api/shorturlinfo?shorturl={share_url}"
-        resp = requests.get(api_url, headers=HEADERS, timeout=20)
-        resp.raise_for_status()
-        data = resp.json()
-        file_list = data.get("list", [])
-        if file_list:
-            item      = file_list[0]
-            title     = item.get("server_filename") or "Video"
-            thumbs    = item.get("thumbs") or {}
-            thumbnail = thumbs.get("url3") or thumbs.get("url1")
-            direct    = item.get("dlink") or item.get("download_link") or ""
-            size_b    = int(item.get("size", 0))
-            if direct:
-                return {
-                    "title":      title,
-                    "thumbnail":  thumbnail,
-                    "direct_url": direct,
-                    "size":       _human_size(size_b),
-                    "is_video":   _is_video_file(title),
-                }
+        api = f"https://teraboxdl.vercel.app/api?url={encoded}"
+        r = requests.get(api, headers=HEADERS, timeout=25)
+        r.raise_for_status()
+        data = r.json()
+        logger.info("Resolver 2 response: %s", data)
+        direct = data.get("downloadLink") or data.get("download_url") or data.get("url") or ""
+        if direct:
+            return {
+                "title":      data.get("title") or data.get("filename") or "Video",
+                "thumbnail":  data.get("thumbnail") or data.get("thumb"),
+                "direct_url": direct,
+                "size":       str(data.get("size") or "অজানা"),
+                "is_video":   _is_video_file(data.get("title") or ""),
+            }
     except Exception as e:
         logger.warning("Resolver 2 failed: %s", e)
 
+    # ── Resolver 3: tb.nadim.workers.dev ─────────────────────────────────────
+    try:
+        api = f"https://tb.nadim.workers.dev/?url={encoded}"
+        r = requests.get(api, headers=HEADERS, timeout=25)
+        r.raise_for_status()
+        data = r.json()
+        logger.info("Resolver 3 response: %s", data)
+        direct = data.get("direct_link") or data.get("download_url") or data.get("url") or ""
+        if direct:
+            return {
+                "title":      data.get("file_name") or data.get("title") or "Video",
+                "thumbnail":  data.get("thumbnail"),
+                "direct_url": direct,
+                "size":       str(data.get("size") or "অজানা"),
+                "is_video":   _is_video_file(data.get("file_name") or ""),
+            }
+    except Exception as e:
+        logger.warning("Resolver 3 failed: %s", e)
+
+    # ── Resolver 4: terabox.udayscriptsx ─────────────────────────────────────
+    try:
+        api = f"https://terabox.udayscriptsx.workers.dev/?url={encoded}"
+        r = requests.get(api, headers=HEADERS, timeout=25)
+        r.raise_for_status()
+        data = r.json()
+        logger.info("Resolver 4 response: %s", data)
+        if data.get("status") == "success":
+            direct = data.get("direct_url") or data.get("download_url") or ""
+            if direct:
+                return {
+                    "title":      data.get("title") or "Video",
+                    "thumbnail":  data.get("thumbnail"),
+                    "direct_url": direct,
+                    "size":       str(data.get("size") or "অজানা"),
+                    "is_video":   _is_video_file(data.get("title") or ""),
+                }
+    except Exception as e:
+        logger.warning("Resolver 4 failed: %s", e)
+
     raise ValueError(
-        "লিংকটি resolve করা যায়নি।\n"
-        "• লিংকটি সঠিক কিনা চেক করুন\n"
-        "• publicly shared কিনা নিশ্চিত করুন\n"
+        "সব resolver fail করেছে।\n"
+        "• লিংকটি publicly shared কিনা নিশ্চিত করুন\n"
+        "• Terabox-এ লিংকটি এখনও active আছে কিনা দেখুন\n"
         "• কিছুক্ষণ পরে আবার চেষ্টা করুন"
     )
 
 
-# ── Telegram API calls ────────────────────────────────────────────────────────
+# ── Telegram helpers ──────────────────────────────────────────────────────────
 
-def tg_send(chat_id: int, text: str, reply_markup=None, parse_mode="Markdown"):
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode}
+def tg_send(chat_id, text, reply_markup=None):
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
     if reply_markup:
         payload["reply_markup"] = json.dumps(reply_markup)
-    requests.post(f"{TELEGRAM_API}/sendMessage", json=payload, timeout=10)
+    try:
+        requests.post(f"{TELEGRAM_API}/sendMessage", json=payload, timeout=10)
+    except Exception as e:
+        logger.error("tg_send error: %s", e)
 
 
-def tg_send_photo(chat_id: int, photo: str, caption: str, reply_markup=None):
+def tg_send_photo(chat_id, photo, caption, reply_markup=None):
     payload = {"chat_id": chat_id, "photo": photo, "caption": caption, "parse_mode": "Markdown"}
     if reply_markup:
         payload["reply_markup"] = json.dumps(reply_markup)
     try:
         r = requests.post(f"{TELEGRAM_API}/sendPhoto", json=payload, timeout=10)
-        return r.status_code == 200
+        return r.status_code == 200 and r.json().get("ok")
     except Exception:
         return False
 
 
-def process_message(chat_id: int, text: str):
+def process_message(chat_id, text):
     text = text.strip()
 
-    # Commands
-    if text in ("/start", "/start@" + get_bot_username()):
+    if text.startswith("/start"):
         tg_send(chat_id,
             "👋 *স্বাগতম Terabox Bot-এ!*\n\n"
             "যেকোনো *Terabox শেয়ার লিংক* পাঠান।\n"
@@ -138,7 +174,7 @@ def process_message(chat_id: int, text: str):
         )
         return
 
-    if text in ("/help", "/help@" + get_bot_username()):
+    if text.startswith("/help"):
         tg_send(chat_id,
             "📖 *কিভাবে ব্যবহার করবেন:*\n\n"
             "১. Terabox-এ ভিডিওর শেয়ার লিংক কপি করুন\n"
@@ -147,7 +183,6 @@ def process_message(chat_id: int, text: str):
         )
         return
 
-    # Extract URL
     url_match = re.search(r"https?://\S+", text)
     if not url_match:
         tg_send(chat_id, "⚠️ কোনো লিংক পাইনি। একটি Terabox শেয়ার লিংক পাঠান।")
@@ -156,10 +191,9 @@ def process_message(chat_id: int, text: str):
     url = url_match.group(0).rstrip(")")
 
     if not is_terabox_link(url):
-        tg_send(chat_id, "❌ এটি Terabox লিংক মনে হচ্ছে না।\nসঠিক Terabox শেয়ার লিংক পাঠান।")
+        tg_send(chat_id, "❌ এটি Terabox লিংক মনে হচ্ছে না।")
         return
 
-    # Processing notice
     tg_send(chat_id, "⏳ লিংক প্রসেস হচ্ছে...")
 
     try:
@@ -167,22 +201,21 @@ def process_message(chat_id: int, text: str):
     except ValueError as exc:
         tg_send(chat_id, f"❌ *সমস্যা হয়েছে:*\n{exc}")
         return
-    except Exception:
+    except Exception as e:
+        logger.exception("Unexpected error")
         tg_send(chat_id, "❌ অপ্রত্যাশিত সমস্যা। পরে আবার চেষ্টা করুন।")
         return
 
     direct = info["direct_url"]
     title  = info["title"]
     size   = info["size"]
-    is_vid = info["is_video"]
+    emoji  = "🎬" if info["is_video"] else "📁"
     thumb  = info.get("thumbnail")
-    emoji  = "🎬" if is_vid else "📁"
 
     caption = (
         f"{emoji} *{title}*\n"
         f"📦 সাইজ: `{size}`\n\n"
-        "▶️ Stream বাটনে ক্লিক করলে সরাসরি চলবে।\n"
-        "⬇️ Download বাটন দিয়ে সেভ করুন।"
+        "নিচের বাটনে ক্লিক করুন:"
     )
 
     keyboard = {
@@ -200,19 +233,7 @@ def process_message(chat_id: int, text: str):
     tg_send(chat_id, caption, keyboard)
 
 
-_bot_username = None
-def get_bot_username():
-    global _bot_username
-    if not _bot_username:
-        try:
-            r = requests.get(f"{TELEGRAM_API}/getMe", timeout=5)
-            _bot_username = r.json().get("result", {}).get("username", "")
-        except Exception:
-            _bot_username = ""
-    return _bot_username
-
-
-# ── Vercel serverless handler ─────────────────────────────────────────────────
+# ── Vercel handler ────────────────────────────────────────────────────────────
 
 class handler(BaseHTTPRequestHandler):
 
@@ -222,13 +243,12 @@ class handler(BaseHTTPRequestHandler):
             body   = self.rfile.read(length)
             update = json.loads(body)
 
-            message = update.get("message") or update.get("edited_message")
-            if message:
-                chat_id = message["chat"]["id"]
-                text    = message.get("text", "")
+            msg = update.get("message") or update.get("edited_message")
+            if msg:
+                chat_id = msg["chat"]["id"]
+                text    = msg.get("text", "")
                 if text:
                     process_message(chat_id, text)
-
         except Exception as e:
             logger.exception("Webhook error: %s", e)
 
@@ -239,7 +259,7 @@ class handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Terabox Bot is running!")
+        self.wfile.write(b"Terabox Bot is alive!")
 
     def log_message(self, *args):
-        pass  # suppress default access logs
+        pass
